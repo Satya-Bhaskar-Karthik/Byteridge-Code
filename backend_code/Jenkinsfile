@@ -1,0 +1,195 @@
+#!/usr/bin/env groovy
+library 'jenkins'
+
+def byteridge 
+
+pipeline
+{
+    agent any
+
+    environment {
+        DOMAIN = "byteridge.com"
+        APP_NAMESPACE = "registry.${DOMAIN}"
+
+        APP_REPOSITORY = "demo-api"
+        APP_NAME = APP_REPOSITORY.replaceAll("-","_")
+
+        APP_VERSION = sh(script: 'cat package.json | grep version | head -1 | awk -F: \'{ print $2 }\' | sed \'s/[",]//g\' ' , returnStdout: true).replaceAll("\\s","")
+        
+        APP_BUILD = env.BUILD_ID.toInteger()
+        APP_BRANCH = evaluateBranch()
+        APP_ENVIRONMENT = evaluateEnvironment(APP_BRANCH)
+
+        APP_RELEASE = "${APP_VERSION} (${APP_BUILD}-${APP_BRANCH})"
+        APP_TAG = "${APP_VERSION}.${APP_BUILD}-${APP_BRANCH}"
+        APP_IMAGE = "${APP_NAMESPACE}/demo/${APP_REPOSITORY}:${APP_TAG}"
+        APP_CONTAINER_VERSION = "${APP_NAME}_${APP_BRANCH}"
+
+        APP_CONTAINER = APP_CONTAINER_VERSION.replaceAll("-","_")
+
+        APP_DOMAIN = "${APP_REPOSITORY}-${APP_BRANCH}.${DOMAIN}"
+
+        DOCKER_REGISTRY = "https://${APP_NAMESPACE}"
+        DOCKER_REGISTRY_CREDENTIAL = "byteridge-registry"
+
+        MESSAGE = "STARTED"
+    }
+    options {
+        buildDiscarder(logRotator(numToKeepStr:'1'))
+    }
+
+    stages {
+
+        stage ('Start') {
+            steps {
+                notify message
+            }
+        }
+
+        
+        stage('Build, Publish, Deploy') {  
+            agent any
+            when {
+                environment name: 'APP_ENVIRONMENT', value: 'development'
+            }
+            stages {
+                stage("Build & Publish") {
+                    agent any
+                    steps {
+                        echo "Build started : ${APP_IMAGE}"
+                        script {
+                            byteridge = docker.build("${APP_IMAGE}")
+
+                            docker.withRegistry(DOCKER_REGISTRY, DOCKER_REGISTRY_CREDENTIAL) {
+                                byteridge.push("${APP_TAG}")
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            echo "Build & Publish complete : ${APP_IMAGE}"
+                        }
+                        failure {
+                            script {
+                                MESSAGE = "FAILURE"
+                            }
+                            echo "Build & Publish failed : ${APP_IMAGE}"
+                        }
+                    }
+                }
+
+                stage("Deploy") {
+                    agent any
+                    steps {
+                        script {
+                             sh "docker-compose -f ${APP_REPOSITORY}.yml up -d"
+                        }
+                    }
+                    post {
+                        success {
+                            echo "Deploy complete : ${APP_IMAGE}"
+                        }
+                        failure {
+                            script {
+                                MESSAGE = "FAILURE"
+                            }
+                            echo "Deploy failed :  ${APP_IMAGE}"
+                        }
+                    }
+                }
+
+                stage("Cleanup") {
+                    agent any
+                    steps {
+                        echo "Cleaning up ${APP_IMAGE}"
+
+                        cleanWs()
+                    }
+                }
+            }
+            post {
+                always {
+                    script {
+                        MESSAGE = "COMPLETED"
+                    }
+                    notify MESSAGE
+                }
+                success {
+                    script {
+                        MESSAGE = currentBuild.result
+
+                        echo "Deployed on ECR ${APP_IMAGE}"
+                    }
+                    notify MESSAGE
+                }
+                failure {
+                    notify MESSAGE
+                }
+                unstable {
+                    script {
+                        MESSAGE = "UNSTABLE"
+                    }
+                    notify MESSAGE
+                }
+                changed {
+                    script {
+                        MESSAGE = "CHANGED"
+                    }
+                    notify MESSAGE
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                MESSAGE = "COMPLETED"
+            }
+            notify MESSAGE
+        }
+        success {
+            script {
+                MESSAGE = currentBuild.result
+
+                echo "Development build can be accessed @ https://${APP_DOMAIN}"
+            }
+            notify MESSAGE
+        }
+        failure {
+            script {
+                MESSAGE = "FAILURE"
+            }
+            notify MESSAGE
+        }
+        unstable {
+            script {
+                MESSAGE = "UNSTABLE"
+            }
+            notify MESSAGE
+        }
+        changed {
+            script {
+                MESSAGE = "CHANGED"
+            }
+            notify MESSAGE
+        }
+    }
+}
+
+def evaluateBranch() {
+    return env.BRANCH_NAME.toLowerCase().replaceAll(/[^A-Za-z0-9]/,'-')
+}
+
+def evaluateEnvironment(branch) {
+    if(branch.equalsIgnoreCase("master") || branch.equalsIgnoreCase("release")){
+        return "production"
+    } else if (branch.equalsIgnoreCase("uat")){
+        return "uat"
+    } 
+    else if (branch.equalsIgnoreCase("qa")){
+        return "qa"
+    } 
+    else {
+        return "development"
+    }
+}

@@ -1,0 +1,25 @@
+version: "3.7"
+
+networks:
+  internet:
+    external: true
+  intranet:
+    external: false
+    name: intranet 
+
+services:
+  fleet:
+    image: ${APP_IMAGE}
+    container_name: ${APP_CONTAINER}
+    restart: always
+    environment:
+      NODE_ENV: ${APP_ENVIRONMENT}
+      API_VERSION: ${APP_RELEASE}
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+    labels:
+      - traefik.frontend.rule=Host:${APP_DOMAIN}
+      - traefik.docker.network=internet
+      - traefik.port=4000
+    networks:
+      - internet
